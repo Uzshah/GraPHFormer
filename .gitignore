@@ -1,0 +1,22 @@
+# Logs, results, and data
+work_dir/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+*.log
+
+# OS
+.DS_Store
