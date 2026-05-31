@@ -1,10 +1,14 @@
 ---
 tags:
-- computer-vision
-- segmentation
+- graph-neural-networks
+- classification
+- computational-neuroscience
+- neuron-morphology
+- biomedical-ai
 - pytorch
-- deep-learning
 license: apache-2.0
+datasets:
+- custom
 ---
 # GraPHFormer: A Multimodal Graph Persistent Homology Transformer for the Analysis of Neuroscience Morphologies
 
