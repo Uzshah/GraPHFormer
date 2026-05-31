@@ -4,8 +4,8 @@
 
 Uzair Shah, Marco Agus, Mahmoud Gamal, Mahmood Alzubaidi, Corrado Cali, Pierre J. Magistretti, Abdesselam Bouzerdoum, Mowafa Househ
 
-[[Paper]](https://arxiv.org/abs/2603.20970)
-
+[[arxive]](https://arxiv.org/abs/2603.20970)
+[[CVPR]](https://openaccess.thecvf.com/content/CVPR2026/papers/Shah_GraPHFormer_A_Multimodal_Graph_Persistent_Homology_Transformer_for_the_Analysis_CVPR_2026_paper.pdf)
 ---
 
 ## Overview
