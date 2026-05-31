@@ -153,8 +153,8 @@ Evaluated on six datasets:
 | ACT-4 | Cortical layer classification | 4 |
 | JML-4 | Brain region classification | 4 |
 | N7 | Neuron type classification | 7 |
-| M1-Cell | Cell type classification | — |
-| M1-REG | Cortical region classification | — |
+| M1-Cell | Cell type classification | 3 |
+| M1-REG | Cortical region classification | 3 |
 
 GraPHFormer achieves state-of-the-art on 5/6 benchmarks, outperforming topology-only, graph-only, and morphometrics baselines.
 
