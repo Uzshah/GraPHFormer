@@ -1,3 +1,11 @@
+---
+tags:
+- computer-vision
+- segmentation
+- pytorch
+- deep-learning
+license: apache-2.0
+---
 # GraPHFormer: A Multimodal Graph Persistent Homology Transformer for the Analysis of Neuroscience Morphologies
 
 **CVPR 2026 (Main Track)**
