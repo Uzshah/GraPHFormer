@@ -123,6 +123,26 @@ python finetune.py \
     --epochs 50
 ```
 
+## Checkpoints
+
+We provide all trained model checkpoints on Hugging Face for reproducibility and easy access:
+
+🔗 Hugging Face Model Repository:  
+https://huggingface.co/uzsh31989/GraPHFormer
+
+📁 Checkpoints directory:  
+https://huggingface.co/uzsh31989/GraPHFormer/tree/main/checkpoints
+
+To download programmatically:
+
+```python
+from huggingface_hub import hf_hub_download
+
+file_path = hf_hub_download(
+    repo_id="uzsh31989/GraPHFormer",
+    filename="checkpoints/N7_best_weights.pth"
+)
+
 ## Benchmarks
 
 Evaluated on six datasets:
