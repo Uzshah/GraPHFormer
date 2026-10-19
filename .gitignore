@@ -1,6 +1,6 @@
 # Logs, results, and data
 work_dir/
-data/
+/data/
 
 # Python
 __pycache__/
