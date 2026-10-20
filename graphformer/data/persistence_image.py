@@ -1,221 +1,220 @@
-"""Radial tree persistence and three-channel Gaussian persistence images.
+"""
+Persistence Image Generation Module
 
-Coordinates are distances from the soma. At each branch the longest surviving
-leaf continues toward the soma; other branches die at the merge. Channels encode
-unweighted, persistence-weighted, and mean branch radius-weighted densities.
+Functions for generating persistence images from SWC neuron morphology files
+using Topological Morphology Descriptor (TMD) approach.
 """
 
+import math
 import numpy as np
-import torch
+from collections import defaultdict, deque
+from typing import Tuple, Dict, List
 
 
-def compute_persistence_pairs(lines):
-    """Return persistence features from SWC rows, allowing non-contiguous IDs."""
-    lines = np.asarray(lines, dtype=float)
-    if lines.ndim != 2 or lines.shape[1] < 7 or not len(lines):
-        raise ValueError("Expected nonempty SWC rows with at least seven columns")
-    ids = lines[:, 0].astype(int)
-    if len(set(ids)) != len(ids):
-        raise ValueError("SWC node IDs must be unique")
-    lookup = {node_id: i for i, node_id in enumerate(ids)}
-    roots = np.flatnonzero(lines[:, 6] == -1)
-    if len(roots) != 1:
-        raise ValueError("Expected exactly one soma/root (parent -1)")
-    root = int(roots[0])
-    children = [[] for _ in lines]
-    for i, parent in enumerate(lines[:, 6].astype(int)):
-        if parent != -1:
-            if parent not in lookup:
-                raise ValueError(f"Missing SWC parent {parent}")
-            children[lookup[parent]].append(i)
-    radial = np.linalg.norm(lines[:, 2:5] - lines[root, 2:5], axis=1)
-    # Iterative postorder also detects disconnected cycles without recursion limits.
-    order, stack = [], [root]
-    seen = set()
+def read_swc_robust(path: str):
+    """Parse a SWC file -> list of tuples (id, type, x, y, z, r, parent)."""
+    rows = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 7:
+                continue
+            try:
+                nid = int(float(parts[0]))
+                ntype = int(float(parts[1]))
+                x = float(parts[2]); y = float(parts[3]); z = float(parts[4])
+                r = float(parts[5]); parent = int(float(parts[6]))
+                rows.append((nid, ntype, x, y, z, r, parent))
+            except Exception:
+                continue
+    if not rows:
+        raise ValueError(f"No valid SWC rows in {path}")
+    return rows
+
+
+def build_tree(rows) -> Tuple[int, Dict[int, List[int]], Dict[int, Tuple]]:
+    """Return (root_id, children_map, id->row_dict)."""
+    id2row = {int(r[0]): r for r in rows}
+    children = defaultdict(list)
+    for (nid, _t, _x, _y, _z, _r, parent) in rows:
+        if int(parent) != -1:
+            children[int(parent)].append(int(nid))
+    roots = [int(r[0]) for r in rows if int(r[6]) == -1]
+    root = roots[0] if roots else int(rows[0][0])
+    return root, children, id2row
+
+
+def enforce_monotone_radial(root: int, children: Dict[int, List[int]], id2row: Dict[int, Tuple]) -> Dict[int, float]:
+    """Radial Euclidean distance to soma, enforced non-decreasing along root->leaf."""
+    sx, sy, sz = id2row[root][2], id2row[root][3], id2row[root][4]
+    raw = {}
+    for nid, (_nid, _t, x, y, z, _r, _p) in id2row.items():
+        raw[nid] = math.sqrt((x - sx) ** 2 + (y - sy) ** 2 + (z - sz) ** 2)
+
+    fval = {root: raw[root]}
+    q = deque([root])
+    while q:
+        u = q.popleft()
+        for v in children[u]:
+            fval[v] = max(fval[u], raw[v])
+            q.append(v)
+    return fval
+
+
+def tmd_pairs_with_identities(root: int, children: Dict[int, List[int]], fval: Dict[int, float]):
+    """TMD elder-rule pairing on a rooted tree for a monotone node function fval."""
+    stack = [(root, 0)]
+    post = []
     while stack:
-        node = stack.pop()
-        if node in seen:
-            raise ValueError("Cycle in SWC tree")
-        seen.add(node)
-        order.append(node)
-        stack.extend(children[node])
-    if len(order) != len(lines):
-        raise ValueError("SWC contains disconnected nodes or a cycle")
-    active, pairs = {}, []
+        u, st = stack.pop()
+        if st == 0:
+            stack.append((u, 1))
+            for v in children[u]:
+                stack.append((v, 0))
+        else:
+            post.append(u)
 
-    def emit(branch, death):
-        birth, radii = branch
-        persistence = max(float(birth - death), 0.0)
-        if persistence > 0:
-            pairs.append(dict(birth=float(birth), death=float(death),
-                              persistence=persistence, mean_radius=float(np.mean(radii))))
-
-    for node in reversed(order):
-        if not children[node]:
-            active[node] = (radial[node], [lines[node, 5]])
-            continue
-        branches = [active.pop(child) for child in children[node]]
-        survivor = max(range(len(branches)), key=lambda i: branches[i][0])
-        for i, branch in enumerate(branches):
-            if i != survivor:
-                emit(branch, radial[node])
-        birth, radii = branches[survivor]
-        active[node] = (max(birth, radial[node]), radii + [lines[node, 5]])
-    emit(active[root], 0.0)
+    champion = {}
+    pairs = []
+    for u in post:
+        if not children[u]:
+            champion[u] = (u, fval[u])
+        else:
+            child_champs = [champion[v] for v in children[u]]
+            best_idx = int(np.argmax([b for (_leaf, b) in child_champs]))
+            best = child_champs[best_idx]
+            for j, ch in enumerate(child_champs):
+                if j == best_idx:
+                    continue
+                leaf_id, birth_val = ch
+                pairs.append((float(birth_val), float(fval[u]), int(leaf_id), int(u)))
+            champion[u] = best
     return pairs
 
 
-def persistence_image(pairs_feats, image_size=224, sigma_px=16.0, global_bounds=None):
-    """Render features to a finite float32 CHW tensor with channels in [0, 1].
+def parent_map(rows) -> Dict[int, int]:
+    return {int(r[0]): int(r[6]) for r in rows}
 
-    Bounds are (birth_min, birth_max, persistence_min, persistence_max).
-    Without explicit bounds each diagram is scaled to its own extent.
+
+def path_nodes(parent: Dict[int, int], start: int, stop_exclusive: int) -> List[int]:
+    """Nodes from 'start' up to but not including 'stop_exclusive'."""
+    u = start
+    nodes = [u]
+    while u != stop_exclusive and u != -1:
+        u = parent.get(u, -1)
+        if u == -1:
+            break
+        nodes.append(u)
+    return nodes
+
+
+def compute_pair_features(pairs, parent, id2row):
+    """Add persistence and mean radius along the leaf->death path."""
+    feats = []
+    for (birth, death, leaf, death_node) in pairs:
+        nodes = path_nodes(parent, leaf, death_node)
+        radii = [float(id2row[n][5]) for n in nodes if n in id2row]
+        mean_rad = float(np.mean(radii)) if radii else 0.0
+        feats.append({
+            "birth": float(birth),
+            "death": float(death),
+            "persistence": float(birth - death),
+            "mean_radius": mean_rad
+        })
+    return feats
+
+
+def pi_weighted(pairs_feats: List[dict], H=256, W=256, sigma_px=16.0, weight_key=None, pdf=True,
+                global_bounds=None) -> np.ndarray:
+    """Build a 2D density on (birth, persistence).
+
+    Args:
+        pairs_feats: List of feature dictionaries
+        H, W: Image dimensions
+        sigma_px: Gaussian kernel width in pixels
+        weight_key: Optional key for weighting points
+        pdf: If True, normalize kernel as PDF
+        global_bounds: Optional tuple (birth_min, birth_max, pers_min, pers_max)
     """
-    if image_size <= 0 or sigma_px <= 0:
-        raise ValueError("image_size and sigma_px must be positive")
-    result = np.zeros((3, image_size, image_size), dtype=np.float32)
     if not pairs_feats:
-        return torch.from_numpy(result)
-    births = np.array([p['birth'] for p in pairs_feats])
-    pers = np.array([p['persistence'] for p in pairs_feats])
-    radii = np.array([p['mean_radius'] for p in pairs_feats])
-    if not np.isfinite(np.concatenate([births, pers, radii])).all():
-        raise ValueError("Persistence features must be finite")
-    if global_bounds is None:
-        global_bounds = (0, max(float(births.max()), 1e-6), 0, max(float(pers.max()), 1e-6))
-    bmin, bmax, pmin, pmax = global_bounds
-    if bmax <= bmin or pmax <= pmin:
-        raise ValueError("Persistence bounds must have positive extent")
-    grid = np.arange(image_size, dtype=np.float32)
-    for birth, persistence, radius in zip(births, pers, radii):
-        x = (birth - bmin) / (bmax - bmin) * (image_size - 1)
-        y = (persistence - pmin) / (pmax - pmin) * (image_size - 1)
-        kernel = np.exp(-((grid[None, :] - x)**2 + (grid[:, None] - y)**2) / (2 * sigma_px**2))
-        result += np.array([1, max(persistence, 0), max(radius, 0)], dtype=np.float32)[:, None, None] * kernel
-    maxima = result.max(axis=(1, 2), keepdims=True)
-    np.divide(result, maxima, out=result, where=maxima > 0)
-    return torch.from_numpy(result)
+        return np.zeros((H, W), dtype=np.float32)
 
+    births = np.array([p["birth"] for p in pairs_feats], dtype=np.float32)
+    pers = np.array([p["persistence"] for p in pairs_feats], dtype=np.float32)
 
-def compute_persistence_image(lines, image_size=224, sigma_px=16.0,
-                              augmentation=None, global_bounds=None):
-    """Compute an image, optionally augmenting features before rendering."""
-    pairs = compute_persistence_pairs(lines)
-    if augmentation is not None:
-        pairs = augmentation.augment_pairs_features(pairs, global_bounds)
-        sigma_px = augmentation.sample_sigma(sigma_px)
-    return persistence_image(pairs, image_size, sigma_px, global_bounds)
+    mask = pers > 1e-9
+    births, pers = births[mask], pers[mask]
 
+    if len(births) == 0:
+        return np.zeros((H, W), dtype=np.float32)
 
-# PNG-backed loaders for persistence images that have already been generated.
-from collections import namedtuple
-from pathlib import Path
-from PIL import Image
-from torch.utils.data import Dataset
-
-ImageBatch = namedtuple('ImageBatch', ['images', 'labels'])
-ImageBatchTwoViews = namedtuple('ImageBatchTwoViews', ['view1', 'view2'])
-
-IMAGE_LABEL_DICT = {
-    'BIL': dict(CP=0, Isocortex_layer23=1, Isocortex_layer4=2,
-                Isocortex_layer5=3, Isocortex_layer6=4, VPM=5),
-    'JML': dict(Isocortex_layer23=0, Isocortex_layer5=1, Isocortex_layer6=2, VPM=3),
-    'ACT': dict(Isocortex_layer23=0, Isocortex_layer4=1,
-                Isocortex_layer5=2, Isocortex_layer6=3),
-    'ALL': dict(VPM=0, Isocortex_layer23=1, Isocortex_layer4=2, PRE=3,
-                SUB=4, CP=5, VPL=6, Isocortex_layer6=7, MG=8, Isocortex_layer5=9),
-}
-
-
-# Preserve the mapping name used by standalone PNG-loading callers.
-LABEL_DICT = IMAGE_LABEL_DICT
-
-
-class PersistenceImageDataset(Dataset):
-    """Load RGB PNGs under class/source_split directories.
-
-    Dataset-specific source names prevent mixing BIL, JML, and ACT samples
-    when their split directories share a class folder. ALL includes all sources.
-    Corrupt images raise an error rather than silently introducing blank samples.
-    """
-    def __init__(self, data_root, dataset, splits, transform=None, phase='train'):
-        if dataset not in IMAGE_LABEL_DICT:
-            raise ValueError(f'Dataset must be one of {list(IMAGE_LABEL_DICT)}')
-        self.data_root, self.dataset = Path(data_root), dataset
-        self.splits, self.transform, self.phase = list(splits), transform, phase
-        self.label_dict = IMAGE_LABEL_DICT[dataset]
-        self.classes = list(self.label_dict)
-        self.num_classes = len(self.classes)
-        self.samples = self._build_samples()
-        self.targets = [label for _, label in self.samples]
-        if not self.samples:
-            raise ValueError(f'No PNG samples in {self.data_root} for {dataset}, splits {self.splits}')
-
-    def _build_samples(self):
-        import re
-        prefixes = {'BIL': {'bil'}, 'JML': {'janelia_mouselight', 'jml', 'jm'},
-                    'ACT': {'allen_cell_type', 'act'}}
-        samples = []
-        for name, label in self.label_dict.items():
-            class_dir = self.data_root / name
-            if not class_dir.is_dir():
-                continue
-            for folder in sorted(class_dir.iterdir()):
-                if not folder.is_dir():
-                    continue
-                match = re.fullmatch(r'(?:(.+)[_-])?(\d+)', folder.name)
-                if not match or int(match.group(2)) not in self.splits:
-                    continue
-                source = match.group(1)
-                if source is not None and self.dataset != 'ALL' and source.lower() not in prefixes[self.dataset]:
-                    continue
-                samples.extend((str(path), label) for path in sorted(folder.iterdir())
-                               if path.is_file() and path.suffix.lower() == '.png')
-        return samples
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        with Image.open(path) as source:
-            image = source.convert('RGB')
-        return (self.transform(image) if self.transform is not None else image), label
-
-
-class PersistenceImageDatasetTwoViews(PersistenceImageDataset):
-    def __getitem__(self, idx):
-        path, _ = self.samples[idx]
-        with Image.open(path) as source:
-            image = source.convert('RGB')
-        transform = self.transform
-        if transform is None:
-            from torchvision.transforms import ToTensor
-            transform = ToTensor()
-        return transform(image.copy()), transform(image.copy())
-
-
-def get_collate_fn(device, use_two_views=False):
-    """Collate PNG datasets; graph datasets use dataset.get_collate_fn."""
-    def collate(batch):
-        first, second = zip(*batch)
-        first = torch.stack(first).to(device)
-        if use_two_views:
-            return ImageBatchTwoViews(first, torch.stack(second).to(device))
-        return ImageBatch(first, torch.tensor(second, dtype=torch.long, device=device))
-    return collate
-
-
-def get_transforms(image_size=224, augment=True, is_training=True):
-    """Return RGB transforms with ImageNet normalization for DINOv2."""
-    from torchvision import transforms
-    if is_training and augment:
-        operations = [transforms.RandomResizedCrop(image_size, scale=(0.2, 1.0)),
-                      transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
-                      transforms.RandomRotation(15),
-                      transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
-                      transforms.RandomGrayscale(p=0.2)]
+    if global_bounds is not None:
+        xmin, xmax, ymin, ymax = global_bounds
     else:
-        operations = [transforms.Resize(image_size), transforms.CenterCrop(image_size)]
-    return transforms.Compose(operations + [transforms.ToTensor(), transforms.Normalize(
-        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+        xmin, xmax = births.min(), births.max()
+        ymin, ymax = pers.min(), pers.max()
+
+    eps = 1e-8
+    births_clamped = np.clip(births, xmin, xmax)
+    pers_clamped = np.clip(pers, ymin, ymax)
+
+    u = (births_clamped - xmin) / (xmax - xmin + eps) * (W - 1)
+    v = (pers_clamped - ymin) / (ymax - ymin + eps) * (H - 1)
+
+    if weight_key is None:
+        w = np.ones_like(u, dtype=np.float32)
+    else:
+        raw = np.array([p[weight_key] for p in pairs_feats], dtype=np.float32)[mask]
+        lo, hi = np.percentile(raw, 1), np.percentile(raw, 99)
+        w = np.clip((raw - lo) / (hi - lo + 1e-8), 0, 1).astype(np.float32)
+        if np.all(w == 0):
+            w = np.ones_like(u, dtype=np.float32)
+
+    X, Y = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+    out = np.zeros((H, W), dtype=np.float32)
+    s2 = 2.0 * (sigma_px ** 2)
+    k_norm = (1.0 / (2.0 * math.pi * (sigma_px ** 2))) if pdf else 1.0
+
+    for i in range(len(u)):
+        cx, cy = u[i], v[i]
+        D = (X - cx) ** 2 + (Y - cy) ** 2
+        out += (w[i] * k_norm) * np.exp(-D / s2)
+
+    return out
+
+
+def make_rgb_pi(rows, H=256, W=256, sigma_px=16.0, global_bounds=(0, 300, 0, 100),
+                persistence_aug=None, channel_mode='RGB') -> np.ndarray:
+    """Compose R/G/B channels and return float32 image in [0,1].
+
+    Args:
+        rows: SWC rows from read_swc_robust
+        H, W: Image dimensions
+        sigma_px: Gaussian kernel width
+        global_bounds: Tuple (birth_min, birth_max, pers_min, pers_max)
+        persistence_aug: Optional CombinedPersistenceAugmentation instance
+        channel_mode: 'RGB', 'R_only', 'G_only', 'B_only', etc.
+    """
+    root, children, id2row = build_tree(rows)
+    fval = enforce_monotone_radial(root, children, id2row)
+    pairs = tmd_pairs_with_identities(root, children, fval)
+    pmap = parent_map(rows)
+    feats = compute_pair_features(pairs, pmap, id2row)
+
+    if persistence_aug is not None:
+        feats = persistence_aug.augment_pairs_features(feats, global_bounds)
+        sigma_px = persistence_aug.sample_sigma(sigma_px)
+
+    R = pi_weighted(feats, H=H, W=W, sigma_px=sigma_px, weight_key=None, pdf=True, global_bounds=global_bounds)
+    G = pi_weighted(feats, H=H, W=W, sigma_px=sigma_px, weight_key="persistence", pdf=True, global_bounds=global_bounds)
+    B = pi_weighted(feats, H=H, W=W, sigma_px=sigma_px, weight_key="mean_radius", pdf=True, global_bounds=global_bounds)
+
+    img = np.stack([R, G, B], axis=-1).astype(np.float32)
+    max_val = img.max()
+    min_val = img.min()
+    img = (img - min_val) / (max_val - min_val + 1e-8)
+
+    return img
